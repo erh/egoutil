@@ -416,3 +416,41 @@ func (h *LogoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.state.sessions.DeleteSession(ctx, r, w)
 	http.Redirect(w, r, logoutUrl.String(), http.StatusTemporaryRedirect)
 }
+
+// -------------------------
+
+// this name is terrible
+type TemplatePage interface {
+	// return (template name, thing to pass to template, error)
+	Serve(ctx context.Context, user UserInfo, r *http.Request) (string, interface{}, error)
+}
+
+// this name is terrible
+type WrappedTemplate struct {
+	App  *SimpleWebApp
+	Page TemplatePage
+}
+
+func (wt *WrappedTemplate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ctx, span := trace.StartSpan(ctx, r.URL.Path)
+	defer span.End()
+
+	user, err := wt.App.GetLoggedInUserInfo(ctx, r)
+	if wt.App.HandleError(w, err) {
+		return
+	}
+
+	if user.LoggedIn {
+		span.Annotatef(nil, "logged in user: %s", user.GetEmail())
+	}
+
+	tn, data, err := wt.Page.Serve(ctx, user, r)
+	if wt.App.HandleError(w, err) {
+		return
+	}
+
+	wt.App.HandleError(w, wt.App.LookupTemplate(tn).Execute(w, data))
+}
