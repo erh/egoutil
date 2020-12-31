@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
@@ -427,11 +428,55 @@ type TemplatePage interface {
 
 // this name is terrible
 type WrappedTemplate struct {
-	App  *SimpleWebApp
-	Page TemplatePage
+	App           *SimpleWebApp
+	Page          TemplatePage
+	RequiresLogin bool
 }
 
 func (wt *WrappedTemplate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ctx, span := trace.StartSpan(ctx, r.URL.Path)
+	defer span.End()
+
+	user, err := wt.App.GetLoggedInUserInfo(ctx, r)
+	if wt.App.HandleError(w, err) {
+		return
+	}
+
+	if wt.RequiresLogin && !user.LoggedIn {
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+		return
+	}
+
+	if user.LoggedIn {
+		span.Annotatef(nil, "logged in user: %s", user.GetEmail())
+	}
+
+	tn, data, err := wt.Page.Serve(ctx, user, r)
+	if wt.App.HandleError(w, err) {
+		return
+	}
+
+	wt.App.HandleError(w, wt.App.LookupTemplate(tn).Execute(w, data))
+}
+
+// -------------------------
+
+// this name is terrible
+type APIPage interface {
+	// return (result, error)
+	ServeAPI(ctx context.Context, user UserInfo, r *http.Request) (interface{}, error)
+}
+
+// this name is terrible
+type WrappedAPI struct {
+	App  *SimpleWebApp
+	Page APIPage
+}
+
+func (wt *WrappedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -447,10 +492,16 @@ func (wt *WrappedTemplate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		span.Annotatef(nil, "logged in user: %s", user.GetEmail())
 	}
 
-	tn, data, err := wt.Page.Serve(ctx, user, r)
+	data, err := wt.Page.ServeAPI(ctx, user, r)
 	if wt.App.HandleError(w, err) {
 		return
 	}
 
-	wt.App.HandleError(w, wt.App.LookupTemplate(tn).Execute(w, data))
+	js, err := json.Marshal(data)
+	if wt.App.HandleError(w, err) {
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(js)
 }
