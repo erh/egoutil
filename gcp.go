@@ -5,19 +5,34 @@ import (
 	"fmt"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
+	"golang.org/x/oauth2/google"
 	secretmanagerpb "google.golang.org/genproto/googleapis/cloud/secretmanager/v1"
 )
+
+func GetProjectID(ctx context.Context) (string, error) {
+	credentials, err := google.FindDefaultCredentials(ctx)
+	if err != nil {
+		return "", err
+	}
+	return credentials.ProjectID, nil
+}
 
 type GCPSecrets struct {
 	client *secretmanager.Client
 	id     string
 }
 
-func NewGCPSecrets(ctx context.Context, id string) (*GCPSecrets, error) {
+func NewGCPSecrets(ctx context.Context) (*GCPSecrets, error) {
 	c, err := secretmanager.NewClient(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	id, err := GetProjectID(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	return &GCPSecrets{c, id}, nil
 }
 
