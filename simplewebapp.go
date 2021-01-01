@@ -70,7 +70,7 @@ type SimpleWebAppConfig struct {
 func NewSimpleWebAppConfig() *SimpleWebAppConfig {
 	return &SimpleWebAppConfig{
 		templateDir: "templates",
-		mongoURL:    "mongodb://localhost",
+		mongoURL:    "",
 		webRoot:     "http://localhost:8080",
 	}
 }
@@ -133,16 +133,18 @@ func NewSimpleWebApp(ctx context.Context, cfg *SimpleWebAppConfig) (*SimpleWebAp
 	}
 
 	// mongo
-	a.MongoClient, err = mongo.Connect(ctx, options.Client().ApplyURI(cfg.mongoURL))
-	if err != nil {
-		return nil, err
+	if len(cfg.mongoURL) > 0 {
+		a.MongoClient, err = mongo.Connect(ctx, options.Client().ApplyURI(cfg.mongoURL))
+		if err != nil {
+			return nil, err
+		}
+
+		// init session store
+		a.sessions = NewSessionManager(&MongoDBSessionStore{a.MongoClient.Database("web").Collection("sessions"), nil})
 	}
 
 	// muxer
 	a.Mux = http.NewServeMux()
-
-	// init session store
-	a.sessions = NewSessionManager(&MongoDBSessionStore{a.MongoClient.Database("web").Collection("sessions"), nil})
 
 	// auth0
 	err = a.initAuth0(ctx)
