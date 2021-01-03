@@ -108,7 +108,8 @@ func (c *SimpleWebAppConfig) SetWebRoot(s string) *SimpleWebAppConfig {
 // -----
 
 type SimpleWebApp struct {
-	config *SimpleWebAppConfig
+	config     *SimpleWebAppConfig
+	webRootURL *url.URL
 
 	allTemplates *template.Template
 
@@ -123,11 +124,17 @@ type SimpleWebApp struct {
 }
 
 func NewSimpleWebApp(ctx context.Context, cfg *SimpleWebAppConfig) (*SimpleWebApp, error) {
+	var err error
+
 	a := &SimpleWebApp{}
 	a.config = cfg
+	a.webRootURL, err = url.Parse(a.config.webRoot)
+	if err != nil {
+		return nil, err
+	}
 
 	// templates
-	err := a.initTemplates()
+	err = a.initTemplates()
 	if err != nil {
 		return nil, err
 	}
@@ -463,6 +470,11 @@ type WrappedTemplate struct {
 }
 
 func (wt *WrappedTemplate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Host != "" && r.URL.Host != wt.App.webRootURL.Host {
+		http.Redirect(w, r, wt.App.config.webRoot, http.StatusTemporaryRedirect)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
