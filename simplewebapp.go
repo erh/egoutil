@@ -289,6 +289,33 @@ func (app *SimpleWebApp) HandleError(w http.ResponseWriter, err error, context .
 	return true
 }
 
+func (app *SimpleWebApp) HandleAPIError(w http.ResponseWriter, err error, extra interface{}) bool {
+	if err == nil {
+		return false
+	}
+
+	log.Printf("api error: %s %s\n", err, extra)
+
+	data := map[string]interface{}{"err": err.Error()}
+	if extra != nil {
+		data["extra"] = extra
+	}
+
+	js, err := json.Marshal(data)
+	if err != nil {
+		temp := fmt.Sprintf("err not able to be converted to json (%s) (%s)", data, err)
+		w.WriteHeader(500)
+		w.Write([]byte(temp))
+
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(js)
+	}
+
+	return true
+}
+
 // --------------------------------
 
 type CallbackHandler struct {
@@ -486,7 +513,7 @@ func (wt *WrappedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	user, err := wt.App.GetLoggedInUserInfo(ctx, r)
-	if wt.App.HandleError(w, err) {
+	if wt.App.HandleAPIError(w, err, nil) {
 		return
 	}
 
@@ -495,12 +522,12 @@ func (wt *WrappedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data, err := wt.Page.ServeAPI(ctx, user, r)
-	if wt.App.HandleError(w, err) {
+	if wt.App.HandleAPIError(w, err, data) {
 		return
 	}
 
 	js, err := json.Marshal(data)
-	if wt.App.HandleError(w, err) {
+	if wt.App.HandleAPIError(w, err, nil) {
 		return
 	}
 
