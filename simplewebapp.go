@@ -470,7 +470,7 @@ type WrappedTemplate struct {
 }
 
 func (wt *WrappedTemplate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Host") != "" && r.Header.Get("Host") != wt.App.webRootURL.Host {
+	if r.Host != "" && r.Host != wt.App.webRootURL.Host {
 		http.Redirect(w, r, wt.App.config.webRoot, http.StatusTemporaryRedirect)
 		return
 	}
