@@ -338,7 +338,7 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	session, err := h.state.sessions.Get(ctx, r, true)
-	if h.state.HandleError(w, err, "gettion session") {
+	if h.state.HandleError(w, err, "getting session") {
 		return
 	}
 
@@ -385,8 +385,12 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect to logged in page
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	backto, _ := session.Data["backto"].(string)
+	if len(backto) == 0 {
+		backto = "/"
+	}
+
+	http.Redirect(w, r, backto, http.StatusSeeOther)
 
 }
 
@@ -417,6 +421,7 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session.Data["state"] = state
+	session.Data["backto"] = r.Header.Get("Referer")
 	err = session.Save(ctx, r, w)
 	if h.state.HandleError(w, err, "error saving session") {
 		return
