@@ -95,7 +95,7 @@ func TestRange1(t *testing.T) {
 func TestRange2(t *testing.T) {
 	code := "a{{ range $x := .things }}a{{ $x.c }}b{{end}}b"
 	data := map[string]interface{}{}
-	data["things"] = []map[string]int{map[string]int{"c": 5}, map[string]int{"c": 17}}
+	data["things"] = []map[string]int{{"c": 5}, {"c": 17}}
 
 	compareTemplates(t, code, data)
 }
