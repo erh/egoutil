@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Masterminds/sprig"
+
 	"golang.org/x/oauth2"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -238,7 +240,7 @@ func (app *SimpleWebApp) initTemplates() error {
 	}
 
 	// only assign after we check for errors in case we're reloading
-	foo, err := template.ParseFiles(newFiles...)
+	foo, err := template.New("app").Funcs(sprig.FuncMap()).ParseFiles(newFiles...)
 	if err == nil {
 		app.allTemplates = foo
 	}
