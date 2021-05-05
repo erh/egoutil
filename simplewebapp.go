@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -196,6 +197,9 @@ func (app *SimpleWebApp) initAuth0(ctx context.Context) error {
 
 func (app *SimpleWebApp) GetLoggedInUserInfo(ctx context.Context, r *http.Request) (UserInfo, error) {
 	ui := UserInfo{LoggedIn: false, Properties: map[string]interface{}{"email": ""}}
+	if app.sessions == nil {
+		return ui, nil
+	}
 
 	session, err := app.sessions.Get(ctx, r, false)
 	if err != nil {
@@ -325,6 +329,14 @@ func (app *SimpleWebApp) HandleAPIError(w http.ResponseWriter, err error, extra 
 	return true
 }
 
+func (app *SimpleWebApp) ensureSessions(w http.ResponseWriter) bool {
+	if app.sessions == nil {
+		app.HandleError(w, errors.New("session management not configured"))
+		return false
+	}
+	return true
+}
+
 // --------------------------------
 
 type CallbackHandler struct {
@@ -332,6 +344,9 @@ type CallbackHandler struct {
 }
 
 func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !h.state.ensureSessions(w) {
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -403,6 +418,9 @@ type LoginHandler struct {
 }
 
 func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !h.state.ensureSessions(w) {
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -439,6 +457,10 @@ type LogoutHandler struct {
 }
 
 func (h *LogoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !h.state.ensureSessions(w) {
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
