@@ -50,7 +50,7 @@ func (g *GCPSecrets) GetSecret(ctx context.Context, name string) (string, error)
 	}
 	result, err := g.client.AccessSecretVersion(ctx, accessRequest)
 	if err != nil {
-		return "", fmt.Errorf("failed to access secret version: %v", err)
+		return "", fmt.Errorf("failed to access secret version: %w", err)
 	}
 	return string(result.Payload.Data), nil
 }
