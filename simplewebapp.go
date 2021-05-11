@@ -3,14 +3,17 @@ package egoutil
 import (
 	"context"
 	"crypto/rand"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,8 +29,6 @@ import (
 	oidc "github.com/coreos/go-oidc"
 
 	"go.opencensus.io/trace"
-
-	"github.com/fsnotify/fsnotify"
 )
 
 type UserInfo struct {
@@ -60,8 +61,10 @@ func (u *UserInfo) GetBool(name string) bool {
 // ----
 
 type SimpleWebAppConfig struct {
-	templateDir string
-	mongoURL    string
+	templateSrcDir string
+	templateEmebd  *embed.FS
+
+	mongoURL string
 
 	auth0Domain   string
 	auth0ClientId string
@@ -70,16 +73,14 @@ type SimpleWebAppConfig struct {
 	webRoot string
 }
 
-func NewSimpleWebAppConfig() *SimpleWebAppConfig {
+func NewSimpleWebAppConfig(templateDir string) *SimpleWebAppConfig {
 	return &SimpleWebAppConfig{
-		templateDir: "templates",
-		mongoURL:    "",
-		webRoot:     "http://localhost:8080",
+		templateSrcDir: templateDir,
 	}
 }
 
-func (c *SimpleWebAppConfig) SetTemplateDir(dir string) *SimpleWebAppConfig {
-	c.templateDir = dir
+func (c *SimpleWebAppConfig) SetTemplateEmbed(embeddedTemplate *embed.FS) *SimpleWebAppConfig {
+	c.templateEmebd = embeddedTemplate
 	return c
 }
 
@@ -114,7 +115,7 @@ type SimpleWebApp struct {
 	config     *SimpleWebAppConfig
 	webRootURL *url.URL
 
-	allTemplates *template.Template
+	cachedTemplates *template.Template
 
 	MongoClient *mongo.Client
 
@@ -168,6 +169,10 @@ func NewSimpleWebApp(ctx context.Context, cfg *SimpleWebAppConfig) (*SimpleWebAp
 func (app *SimpleWebApp) initAuth0(ctx context.Context) error {
 	if len(app.config.auth0Domain) == 0 {
 		return nil
+	}
+
+	if app.config.webRoot == "" {
+		return fmt.Errorf("need a webRoot in orde to use auth0")
 	}
 
 	// init auth
@@ -229,62 +234,68 @@ func (app *SimpleWebApp) NewAuthProvder(ctx context.Context) (*oidc.Provider, er
 	return p, nil
 }
 
+func baseTemplate() *template.Template {
+	return template.New("app").Funcs(sprig.FuncMap())
+}
+
+func fixFiles(files []fs.DirEntry, root string) []string {
+	newFiles := []string{}
+	for _, e := range files {
+		x := e.Name()
+		if strings.ContainsAny(x, "#~") {
+			continue
+		}
+
+		newFiles = append(newFiles, filepath.Join(root, x))
+	}
+	return newFiles
+}
+
 func (app *SimpleWebApp) initTemplates() error {
-	files, err := filepath.Glob(app.config.templateDir + "/*.html")
+	if app.config.templateEmebd == nil {
+		return nil
+	}
+
+	files, err := app.config.templateEmebd.ReadDir(app.config.templateSrcDir)
 	if err != nil {
 		return err
 	}
 
-	newFiles := []string{}
-	for _, x := range files {
-		if strings.ContainsAny(x, "#") {
-			continue
-		}
-		newFiles = append(newFiles, x)
+	newFiles := fixFiles(files, app.config.templateSrcDir)
+
+	app.cachedTemplates, err = baseTemplate().ParseFS(app.config.templateEmebd, newFiles...)
+	if err != nil {
+		return fmt.Errorf("error initializing templates from embedded filesystem: %w", err)
 	}
 
-	// only assign after we check for errors in case we're reloading
-	foo, err := template.New("app").Funcs(sprig.FuncMap()).ParseFiles(newFiles...)
-	if err == nil {
-		app.allTemplates = foo
-	}
-	return err
+	return nil
 }
 
-func (app *SimpleWebApp) LookupTemplate(name string) *template.Template {
-	return app.allTemplates.Lookup(name)
+func (app *SimpleWebApp) getMainTemplate() (*template.Template, error) {
+	if app.cachedTemplates != nil {
+		return app.cachedTemplates, nil
+	}
+
+	files, err := os.ReadDir(app.config.templateSrcDir)
+	if err != nil {
+		return nil, err
+	}
+
+	newFiles := fixFiles(files, app.config.templateSrcDir)
+
+	return baseTemplate().ParseFiles(newFiles...)
 }
 
-func (app *SimpleWebApp) ReloadTemplateThread() {
-	// creates a new file watcher
-	watcher, err := fsnotify.NewWatcher()
+func (app *SimpleWebApp) LookupTemplate(name string) (*template.Template, error) {
+	t, err := app.getMainTemplate()
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
-	defer watcher.Close()
-
-	// out of the box fsnotify can watch a single file, or a single directory
-	err = watcher.Add(app.config.templateDir)
-	if err != nil {
-		log.Fatal(err)
+	t = t.Lookup(name)
+	if t == nil {
+		return nil, fmt.Errorf("cannot find template %s", name)
 	}
-
-	for {
-		select {
-		// watch for events
-		case <-watcher.Events:
-			err := app.initTemplates()
-			if err != nil {
-				log.Printf("error releading templates: %s\n", err)
-			} else {
-				log.Print("reloaded templates")
-			}
-
-		case err := <-watcher.Errors:
-			log.Fatal(err)
-		}
-	}
-
+	return t, nil
 }
 
 func (app *SimpleWebApp) HandleError(w http.ResponseWriter, err error, context ...string) bool {
@@ -499,7 +510,7 @@ type WrappedTemplate struct {
 }
 
 func (wt *WrappedTemplate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Host != "" && r.Host != wt.App.webRootURL.Host {
+	if wt.App.config.webRoot != "" && r.Host != "" && r.Host != wt.App.webRootURL.Host {
 		http.Redirect(w, r, wt.App.config.webRoot, http.StatusTemporaryRedirect)
 		return
 	}
@@ -529,7 +540,12 @@ func (wt *WrappedTemplate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wt.App.HandleError(w, wt.App.LookupTemplate(tn).Execute(w, data))
+	t, err := wt.App.LookupTemplate(tn)
+	if wt.App.HandleError(w, err) {
+		return
+	}
+
+	wt.App.HandleError(w, t.Execute(w, data))
 }
 
 // -------------------------
