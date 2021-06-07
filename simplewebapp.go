@@ -29,6 +29,8 @@ import (
 	oidc "github.com/coreos/go-oidc"
 
 	"go.opencensus.io/trace"
+	"goji.io"
+	"goji.io/pat"
 )
 
 type UserInfo struct {
@@ -119,7 +121,7 @@ type SimpleWebApp struct {
 
 	MongoClient *mongo.Client
 
-	Mux *http.ServeMux
+	Mux *goji.Mux
 
 	sessions *SessionManager
 
@@ -155,7 +157,7 @@ func NewSimpleWebApp(ctx context.Context, cfg *SimpleWebAppConfig) (*SimpleWebAp
 	}
 
 	// muxer
-	a.Mux = http.NewServeMux()
+	a.Mux = goji.NewMux()
 
 	// auth0
 	err = a.initAuth0(ctx)
@@ -193,9 +195,9 @@ func (app *SimpleWebApp) initAuth0(ctx context.Context) error {
 		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 	}
 
-	app.Mux.Handle("/callback", &CallbackHandler{app})
-	app.Mux.Handle("/login", &LoginHandler{app})
-	app.Mux.Handle("/logout", &LogoutHandler{app})
+	app.Mux.Handle(pat.New("/callback"), &CallbackHandler{app})
+	app.Mux.Handle(pat.New("/login"), &LoginHandler{app})
+	app.Mux.Handle(pat.New("/logout"), &LogoutHandler{app})
 
 	return nil
 }
