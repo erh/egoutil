@@ -45,7 +45,7 @@ func NewSessionManager(theStore Store) *SessionManager {
 	return sm
 }
 
-func (sm *SessionManager) Get(ctx context.Context, r *http.Request, createIfNotExist bool) (*Session, error) {
+func (sm *SessionManager) Get(r *http.Request, createIfNotExist bool) (*Session, error) {
 	var s *Session = nil
 	var id string = ""
 
@@ -59,7 +59,7 @@ func (sm *SessionManager) Get(ctx context.Context, r *http.Request, createIfNotE
 		}
 		id = c.Value
 
-		s, err = sm.store.Get(ctx, id)
+		s, err = sm.store.Get(r.Context(), id)
 		if err != nil {
 			return nil, fmt.Errorf("couldn't get cookie from store: %s", err)
 		}

@@ -202,13 +202,13 @@ func (app *SimpleWebApp) initAuth0(ctx context.Context) error {
 	return nil
 }
 
-func (app *SimpleWebApp) GetLoggedInUserInfo(ctx context.Context, r *http.Request) (UserInfo, error) {
+func (app *SimpleWebApp) GetLoggedInUserInfo(r *http.Request) (UserInfo, error) {
 	ui := UserInfo{LoggedIn: false, Properties: map[string]interface{}{"email": ""}}
 	if app.sessions == nil {
 		return ui, nil
 	}
 
-	session, err := app.sessions.Get(ctx, r, false)
+	session, err := app.sessions.Get(r, false)
 	if err != nil {
 		return ui, err
 	}
@@ -300,11 +300,37 @@ func (app *SimpleWebApp) LookupTemplate(name string) (*template.Template, error)
 	return t, nil
 }
 
+type ErrorResponse interface {
+	Error() string
+	Status() int
+}
+
+func ErrorResponseStatus(code int) ErrorResponse {
+	return errorResponseStatus(code)
+}
+
+type errorResponseStatus int
+
+func (s errorResponseStatus) Error() string {
+	return http.StatusText(int(s))
+}
+
+func (s errorResponseStatus) Status() int {
+	return int(s)
+}
+
 func (app *SimpleWebApp) HandleError(w http.ResponseWriter, err error, context ...string) bool {
 	if err == nil {
 		return false
 	}
-	w.WriteHeader(500)
+
+	var er ErrorResponse
+	if errors.As(err, &er) {
+		w.WriteHeader(er.Status())
+	} else {
+		w.WriteHeader(500)
+	}
+
 	for _, x := range context {
 		w.Write([]byte(x))
 		w.Write([]byte{'\n'})
@@ -367,7 +393,7 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, span := trace.StartSpan(ctx, r.URL.Path)
 	defer span.End()
 
-	session, err := h.state.sessions.Get(ctx, r, true)
+	session, err := h.state.sessions.Get(r, true)
 	if h.state.HandleError(w, err, "getting session") {
 		return
 	}
@@ -449,7 +475,7 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	state := base64.StdEncoding.EncodeToString(b)
 
-	session, err := h.state.sessions.Get(ctx, r, true)
+	session, err := h.state.sessions.Get(r, true)
 	if h.state.HandleError(w, err, "error getting session") {
 		return
 	}
@@ -498,37 +524,56 @@ func (h *LogoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // -------------------------
 
-// this name is terrible
-type TemplatePage interface {
+type TemplateHandler interface {
 	// return (template name, thing to pass to template, error)
-	Serve(ctx context.Context, user UserInfo, r *http.Request) (string, interface{}, error)
+	Serve(r *http.Request, user UserInfo) (*Template, interface{}, error)
 }
 
-// this name is terrible
-type WrappedTemplate struct {
+type TemplateHandlerFunc func(r *http.Request, user UserInfo) (*Template, interface{}, error)
+
+func (f TemplateHandlerFunc) Serve(r *http.Request, user UserInfo) (*Template, interface{}, error) {
+	return f(r, user)
+}
+
+type Template struct {
+	named  string
+	direct *template.Template
+}
+
+func NamedTemplate(called string) *Template {
+	return &Template{named: called}
+}
+
+func DirectTemplate(t *template.Template) *Template {
+	return &Template{direct: t}
+}
+
+type TemplateMiddleware struct {
 	App           *SimpleWebApp
-	Page          TemplatePage
+	Handler       TemplateHandler
 	RequiresLogin bool
 }
 
-func (wt *WrappedTemplate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if wt.App.config.webRoot != "" && r.Host != "" && r.Host != wt.App.webRootURL.Host {
-		http.Redirect(w, r, wt.App.config.webRoot, http.StatusTemporaryRedirect)
+func (tm *TemplateMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if tm.App.config.webRoot != "" && r.Host != "" && r.Host != tm.App.webRootURL.Host {
+		http.Redirect(w, r, tm.App.config.webRoot, http.StatusTemporaryRedirect)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	ctx, span := trace.StartSpan(ctx, r.URL.Path)
 	defer span.End()
 
-	user, err := wt.App.GetLoggedInUserInfo(ctx, r)
-	if wt.App.HandleError(w, err) {
+	r = r.WithContext(ctx)
+
+	user, err := tm.App.GetLoggedInUserInfo(r)
+	if tm.App.HandleError(w, err) {
 		return
 	}
 
-	if wt.RequiresLogin && !user.LoggedIn {
+	if tm.RequiresLogin && !user.LoggedIn {
 		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}
@@ -537,42 +582,47 @@ func (wt *WrappedTemplate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		span.Annotatef(nil, "logged in user: %s", user.GetEmail())
 	}
 
-	tn, data, err := wt.Page.Serve(ctx, user, r)
-	if wt.App.HandleError(w, err) {
+	t, data, err := tm.Handler.Serve(r, user)
+	if tm.App.HandleError(w, err) {
 		return
 	}
 
-	t, err := wt.App.LookupTemplate(tn)
-	if wt.App.HandleError(w, err) {
-		return
+	gt := t.direct
+	if gt == nil {
+		gt, err = tm.App.LookupTemplate(t.named)
+		if tm.App.HandleError(w, err) {
+			return
+		}
 	}
 
-	wt.App.HandleError(w, t.Execute(w, data))
+	tm.App.HandleError(w, gt.Execute(w, data))
 }
 
 // -------------------------
 
-// this name is terrible
-type APIPage interface {
+// TODO(erd): find a way to merge or reduce code with TemplateHandler
+type APIHandler interface {
 	// return (result, error)
-	ServeAPI(ctx context.Context, user UserInfo, r *http.Request) (interface{}, error)
+	ServeAPI(r *http.Request, user UserInfo) (interface{}, error)
 }
 
-// this name is terrible
-type WrappedAPI struct {
-	App  *SimpleWebApp
-	Page APIPage
+// TODO(erd): find a way to merge or reduce code with TemplateMiddleware
+type APIMiddleware struct {
+	App     *SimpleWebApp
+	Handler APIHandler
 }
 
-func (wt *WrappedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (am *APIMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	ctx, span := trace.StartSpan(ctx, r.URL.Path)
 	defer span.End()
 
-	user, err := wt.App.GetLoggedInUserInfo(ctx, r)
-	if wt.App.HandleAPIError(w, err, nil) {
+	r = r.WithContext(ctx)
+
+	user, err := am.App.GetLoggedInUserInfo(r)
+	if am.App.HandleAPIError(w, err, nil) {
 		return
 	}
 
@@ -580,13 +630,13 @@ func (wt *WrappedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		span.Annotatef(nil, "logged in user: %s", user.GetEmail())
 	}
 
-	data, err := wt.Page.ServeAPI(ctx, user, r)
-	if wt.App.HandleAPIError(w, err, data) {
+	data, err := am.Handler.ServeAPI(r, user)
+	if am.App.HandleAPIError(w, err, data) {
 		return
 	}
 
 	js, err := json.Marshal(data)
-	if wt.App.HandleAPIError(w, err, nil) {
+	if am.App.HandleAPIError(w, err, nil) {
 		return
 	}
 
