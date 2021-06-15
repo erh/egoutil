@@ -18,7 +18,7 @@ func TestSession1(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := sm.Get(context.TODO(), r, false)
+	s, err := sm.Get(r, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestSession1(t *testing.T) {
 		t.Fatal("wtf")
 	}
 
-	s, err = sm.Get(context.TODO(), r, true)
+	s, err = sm.Get(r, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,21 +46,22 @@ func TestSession1(t *testing.T) {
 
 func TestMongoStore(t *testing.T) {
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	connectCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	client, err := mongo.Connect(ctx)
+	client, err := mongo.Connect(connectCtx)
 	if err != nil {
 		t.Skip()
 		return
 	}
 
-	err = client.Ping(ctx, nil)
+	err = client.Ping(connectCtx, nil)
 	if err != nil {
 		t.Skip()
 		return
 	}
 
+	ctx := context.Background()
 	coll := client.Database("test").Collection("sessiontest1")
 	store := &MongoDBSessionStore{coll, nil}
 	defer coll.Drop(ctx)

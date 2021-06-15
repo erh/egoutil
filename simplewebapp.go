@@ -19,14 +19,16 @@ import (
 	"time"
 
 	"github.com/Masterminds/sprig"
+	"go.uber.org/multierr"
 
 	"golang.org/x/oauth2"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
 
-	oidc "github.com/coreos/go-oidc"
+	"github.com/coreos/go-oidc/v3/oidc"
 
 	"go.opencensus.io/trace"
 	"goji.io"
@@ -125,8 +127,9 @@ type SimpleWebApp struct {
 
 	sessions *SessionManager
 
-	authOIConfig *oidc.Config
-	authConfig   oauth2.Config
+	authOIConfig       *oidc.Config
+	authConfig         oauth2.Config
+	auth0HTTPTransport *http.Transport
 }
 
 func NewSimpleWebApp(ctx context.Context, cfg *SimpleWebAppConfig) (*SimpleWebApp, error) {
@@ -151,6 +154,9 @@ func NewSimpleWebApp(ctx context.Context, cfg *SimpleWebAppConfig) (*SimpleWebAp
 		if err != nil {
 			return nil, err
 		}
+		if err := a.MongoClient.Ping(ctx, readpref.Primary()); err != nil {
+			return nil, multierr.Combine(err, a.MongoClient.Disconnect(context.Background()))
+		}
 
 		// init session store
 		a.sessions = NewSessionManager(&MongoDBSessionStore{a.MongoClient.Database("web").Collection("sessions"), nil})
@@ -168,6 +174,19 @@ func NewSimpleWebApp(ctx context.Context, cfg *SimpleWebAppConfig) (*SimpleWebAp
 	return a, nil
 }
 
+func (app *SimpleWebApp) Close() error {
+	var err error
+	if app.MongoClient != nil {
+		err = multierr.Combine(err, app.MongoClient.Disconnect(context.Background()))
+	}
+	if app.auth0HTTPTransport != nil {
+		app.auth0HTTPTransport.CloseIdleConnections()
+	}
+	// mongo driver uses http.DefaultClient with no way to supply our own (like auth0 does).
+	http.DefaultClient.CloseIdleConnections()
+	return err
+}
+
 func (app *SimpleWebApp) initAuth0(ctx context.Context) error {
 	if len(app.config.auth0Domain) == 0 {
 		return nil
@@ -182,10 +201,15 @@ func (app *SimpleWebApp) initAuth0(ctx context.Context) error {
 		ClientID: app.config.auth0ClientId,
 	}
 
+	var httpTransport http.Transport
+	ctx = oidc.ClientContext(ctx, &http.Client{Transport: &httpTransport})
+
 	p, err := app.NewAuthProvder(ctx)
 	if err != nil {
+		httpTransport.CloseIdleConnections()
 		return err
 	}
+	app.auth0HTTPTransport = &httpTransport
 
 	app.authConfig = oauth2.Config{
 		ClientID:     app.config.auth0ClientId,
