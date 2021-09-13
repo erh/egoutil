@@ -41,14 +41,24 @@ type UserInfo struct {
 }
 
 func (u *UserInfo) GetEmail() string {
+	if u.Properties == nil {
+		return ""
+	}
 	return u.Properties["email"].(string)
 }
 
 func (u *UserInfo) GetEmailVerified() bool {
+	if u.Properties == nil {
+		return false
+	}
 	return u.Properties["email_verified"].(bool)
 }
 
 func (u *UserInfo) GetBool(name string) bool {
+	if u.Properties == nil {
+		return false
+	}
+
 	v, found := u.Properties[name]
 	if !found {
 		return false
