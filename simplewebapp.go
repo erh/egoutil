@@ -44,14 +44,22 @@ func (u *UserInfo) GetEmail() string {
 	if u.Properties == nil {
 		return ""
 	}
-	return u.Properties["email"].(string)
+	s, ok := u.Properties["email"].(string)
+	if !ok {
+		return ""
+	}
+	return s
 }
 
 func (u *UserInfo) GetEmailVerified() bool {
 	if u.Properties == nil {
 		return false
 	}
-	return u.Properties["email_verified"].(bool)
+	b, ok := u.Properties["email_verified"].(bool)
+	if !ok {
+		return false
+	}
+	return b
 }
 
 func (u *UserInfo) GetBool(name string) bool {
@@ -258,6 +266,10 @@ func (app *SimpleWebApp) GetLoggedInUserInfo(r *http.Request) (UserInfo, error) 
 
 	ui.LoggedIn = true
 	ui.Properties = v.(bson.M)
+
+	if ui.Properties == nil {
+		log.Printf("how is properties nil for %v", r)
+	}
 
 	return ui, nil
 }
