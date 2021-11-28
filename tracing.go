@@ -26,9 +26,6 @@ func NewNiceLoggingSpanExporter() *NiceLoggingSpanExporter {
 var reZero = regexp.MustCompile(`^0+$`)
 
 func (e *NiceLoggingSpanExporter) printTree(root string, padding string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	for _, s := range e.children[root] {
 		fmt.Printf("%s %s\n", padding, s.toPrint)
 		e.printTree(s.id, padding+"  ")
