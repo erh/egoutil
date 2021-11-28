@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"sync"
 
 	"go.opencensus.io/trace"
 )
@@ -14,16 +15,20 @@ type mySpanInfo struct {
 }
 
 type NiceLoggingSpanExporter struct {
+	mu       sync.Mutex
 	children map[string][]mySpanInfo
 }
 
 func NewNiceLoggingSpanExporter() *NiceLoggingSpanExporter {
-	return &NiceLoggingSpanExporter{map[string][]mySpanInfo{}}
+	return &NiceLoggingSpanExporter{children: map[string][]mySpanInfo{}}
 }
 
 var reZero = regexp.MustCompile(`^0+$`)
 
 func (e *NiceLoggingSpanExporter) printTree(root string, padding string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	for _, s := range e.children[root] {
 		fmt.Printf("%s %s\n", padding, s.toPrint)
 		e.printTree(s.id, padding+"  ")
@@ -32,6 +37,8 @@ func (e *NiceLoggingSpanExporter) printTree(root string, padding string) {
 }
 
 func (e *NiceLoggingSpanExporter) ExportSpan(s *trace.SpanData) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
 	length := (s.EndTime.UnixNano() - s.StartTime.UnixNano()) / (1000 * 1000)
 	myinfo := fmt.Sprintf("%s %d ms", s.Name, length)
