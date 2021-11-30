@@ -370,6 +370,8 @@ func (app *SimpleWebApp) HandleError(w http.ResponseWriter, err error, context .
 		return false
 	}
 
+	log.Println(err)
+
 	var er ErrorResponse
 	if errors.As(err, &er) {
 		w.WriteHeader(er.Status())
@@ -383,7 +385,7 @@ func (app *SimpleWebApp) HandleError(w http.ResponseWriter, err error, context .
 	}
 	w.Write([]byte(err.Error()))
 	w.Write([]byte{'\n'})
-	log.Println(err)
+
 	return true
 }
 
