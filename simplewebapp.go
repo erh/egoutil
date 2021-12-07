@@ -483,15 +483,17 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	session.Data["id_token"] = rawIDToken
 	session.Data["access_token"] = token.AccessToken
 	session.Data["profile"] = profile
-	err = session.Save(ctx, r, w)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 
 	backto, _ := session.Data["backto"].(string)
 	if len(backto) == 0 {
 		backto = "/"
+	}
+
+	session.Data["backto"] = ""
+	err = session.Save(ctx, r, w)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	http.Redirect(w, r, backto, http.StatusSeeOther)
@@ -528,7 +530,13 @@ func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session.Data["state"] = state
-	session.Data["backto"] = r.Header.Get("Referer")
+
+	if r.FormValue("backto") != "" {
+		session.Data["backto"] = r.FormValue("backto")
+	}
+	if session.Data["backto"] == "" {
+		session.Data["backto"] = r.Header.Get("Referer")
+	}
 	err = session.Save(ctx, r, w)
 	if h.state.HandleError(w, err, "error saving session") {
 		return
