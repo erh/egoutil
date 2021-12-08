@@ -128,6 +128,10 @@ func (s *Session) Save(ctx context.Context, r *http.Request, w http.ResponseWrit
 
 // -----
 
+func NewMongoDBSessionStore(coll *mongo.Collection) Store {
+	return &MongoDBSessionStore{collection: coll}
+}
+
 type MongoDBSessionStore struct {
 	collection *mongo.Collection
 	manager    *SessionManager

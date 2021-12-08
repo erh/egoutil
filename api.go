@@ -18,7 +18,6 @@ type APIHandler interface {
 }
 
 type APIMiddleware struct {
-	App     *SimpleWebApp
 	Handler APIHandler
 }
 

@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,4 +142,26 @@ func fixFiles(files []fs.DirEntry, root string) []string {
 
 func baseTemplate() *template.Template {
 	return template.New("app").Funcs(sprig.FuncMap())
+}
+
+type VerifyHost struct {
+	WebRoot string
+	Host    string
+	Handler http.Handler
+}
+
+func NewVerifyHost(root string, h http.Handler) *VerifyHost {
+	u, err := url.Parse(root)
+	if err != nil {
+		panic(err)
+	}
+	return &VerifyHost{root, u.Host, h}
+}
+
+func (vh *VerifyHost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Host != "" && r.Host != vh.Host {
+		http.Redirect(w, r, vh.WebRoot, http.StatusTemporaryRedirect)
+	} else {
+		vh.Handler.ServeHTTP(w, r)
+	}
 }
