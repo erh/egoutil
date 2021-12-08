@@ -2,13 +2,12 @@ package egoutil
 
 import (
 	"context"
-	"crypto/rand"
 	"embed"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -21,18 +20,13 @@ import (
 	"github.com/Masterminds/sprig"
 	"go.uber.org/multierr"
 
-	"golang.org/x/oauth2"
-
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 
-	"github.com/coreos/go-oidc/v3/oidc"
-
 	"go.opencensus.io/trace"
 	"goji.io"
-	"goji.io/pat"
 )
 
 type UserInfo struct {
@@ -145,9 +139,7 @@ type SimpleWebApp struct {
 
 	sessions *SessionManager
 
-	authOIConfig       *oidc.Config
-	authConfig         oauth2.Config
-	auth0HTTPTransport *http.Transport
+	auth0State io.Closer
 }
 
 func NewSimpleWebApp(ctx context.Context, cfg *SimpleWebAppConfig) (*SimpleWebApp, error) {
@@ -197,8 +189,8 @@ func (app *SimpleWebApp) Close() error {
 	if app.MongoClient != nil {
 		err = multierr.Combine(err, app.MongoClient.Disconnect(context.Background()))
 	}
-	if app.auth0HTTPTransport != nil {
-		app.auth0HTTPTransport.CloseIdleConnections()
+	if app.auth0State != nil {
+		err = multierr.Combine(err, app.auth0State.Close())
 	}
 	// mongo driver uses http.DefaultClient with no way to supply our own (like auth0 does).
 	http.DefaultClient.CloseIdleConnections()
@@ -210,38 +202,19 @@ func (app *SimpleWebApp) initAuth0(ctx context.Context) error {
 		return nil
 	}
 
-	if app.config.webRoot == "" {
-		return fmt.Errorf("need a webRoot in orde to use auth0")
-	}
-
-	// init auth
-	app.authOIConfig = &oidc.Config{
-		ClientID: app.config.auth0ClientId,
-	}
-
-	var httpTransport http.Transport
-	ctx = oidc.ClientContext(ctx, &http.Client{Transport: &httpTransport})
-
-	p, err := app.NewAuthProvder(ctx)
-	if err != nil {
-		httpTransport.CloseIdleConnections()
-		return err
-	}
-	app.auth0HTTPTransport = &httpTransport
-
-	app.authConfig = oauth2.Config{
-		ClientID:     app.config.auth0ClientId,
-		ClientSecret: app.config.auth0Secret,
-		RedirectURL:  app.config.webRoot + "/callback",
-		Endpoint:     p.Endpoint(),
-		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
-	}
-
-	app.Mux.Handle(pat.New("/callback"), &CallbackHandler{app})
-	app.Mux.Handle(pat.New("/login"), &LoginHandler{app})
-	app.Mux.Handle(pat.New("/logout"), &LogoutHandler{app})
-
-	return nil
+	var err error
+	app.auth0State, err = InstallAuth0(
+		ctx,
+		app.Mux,
+		app.sessions,
+		Auth0Config{
+			Domain:   app.config.auth0Domain,
+			ClientID: app.config.auth0ClientId,
+			Secret:   app.config.auth0Secret,
+			WebRoot:  app.config.webRoot,
+		},
+	)
+	return err
 }
 
 func (app *SimpleWebApp) GetLoggedInUserInfo(r *http.Request) (UserInfo, error) {
@@ -272,14 +245,6 @@ func (app *SimpleWebApp) GetLoggedInUserInfo(r *http.Request) (UserInfo, error) 
 	}
 
 	return ui, nil
-}
-
-func (app *SimpleWebApp) NewAuthProvder(ctx context.Context) (*oidc.Provider, error) {
-	p, err := oidc.NewProvider(ctx, app.config.auth0Domain)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get provider: %v", err)
-	}
-	return p, nil
 }
 
 func baseTemplate() *template.Template {
@@ -365,7 +330,8 @@ func (s errorResponseStatus) Status() int {
 	return int(s)
 }
 
-func (app *SimpleWebApp) HandleError(w http.ResponseWriter, err error, context ...string) bool {
+// HandleError returns true if there was an error and you should stop
+func HandleError(w http.ResponseWriter, err error, context ...string) bool {
 	if err == nil {
 		return false
 	}
@@ -416,168 +382,6 @@ func (app *SimpleWebApp) HandleAPIError(w http.ResponseWriter, err error, extra 
 	return true
 }
 
-func (app *SimpleWebApp) ensureSessions(w http.ResponseWriter) bool {
-	if app.sessions == nil {
-		app.HandleError(w, errors.New("session management not configured"))
-		return false
-	}
-	return true
-}
-
-// --------------------------------
-
-type CallbackHandler struct {
-	state *SimpleWebApp
-}
-
-func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !h.state.ensureSessions(w) {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	ctx, span := trace.StartSpan(ctx, r.URL.Path)
-	defer span.End()
-
-	session, err := h.state.sessions.Get(r, true)
-	if h.state.HandleError(w, err, "getting session") {
-		return
-	}
-
-	if r.URL.Query().Get("state") != session.Data["state"] {
-		http.Error(w, "Invalid state parameter", http.StatusBadRequest)
-		return
-	}
-
-	token, err := h.state.authConfig.Exchange(ctx, r.URL.Query().Get("code"))
-	if err != nil {
-		log.Printf("no token found: %v", err)
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-
-	rawIDToken, ok := token.Extra("id_token").(string)
-	if !ok {
-		http.Error(w, "No id_token field in oauth2 token.", http.StatusInternalServerError)
-		return
-	}
-
-	p, err := h.state.NewAuthProvder(ctx)
-
-	idToken, err := p.Verifier(h.state.authOIConfig).Verify(ctx, rawIDToken)
-
-	if err != nil {
-		http.Error(w, "Failed to verify ID Token: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Getting now the userInfo
-	var profile map[string]interface{}
-	if err := idToken.Claims(&profile); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	session.Data["id_token"] = rawIDToken
-	session.Data["access_token"] = token.AccessToken
-	session.Data["profile"] = profile
-
-	backto, _ := session.Data["backto"].(string)
-	if len(backto) == 0 {
-		backto = "/"
-	}
-
-	session.Data["backto"] = ""
-	err = session.Save(ctx, r, w)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	http.Redirect(w, r, backto, http.StatusSeeOther)
-
-}
-
-// --------------------------------
-
-type LoginHandler struct {
-	state *SimpleWebApp
-}
-
-func (h *LoginHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !h.state.ensureSessions(w) {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	ctx, span := trace.StartSpan(ctx, r.URL.Path)
-	defer span.End()
-
-	// Generate random state
-	b := make([]byte, 32)
-	_, err := rand.Read(b)
-	if h.state.HandleError(w, err, "error getting random number") {
-		return
-	}
-	state := base64.StdEncoding.EncodeToString(b)
-
-	session, err := h.state.sessions.Get(r, true)
-	if h.state.HandleError(w, err, "error getting session") {
-		return
-	}
-	session.Data["state"] = state
-
-	if r.FormValue("backto") != "" {
-		session.Data["backto"] = r.FormValue("backto")
-	}
-	if session.Data["backto"] == "" {
-		session.Data["backto"] = r.Header.Get("Referer")
-	}
-	err = session.Save(ctx, r, w)
-	if h.state.HandleError(w, err, "error saving session") {
-		return
-	}
-
-	http.Redirect(w, r, h.state.authConfig.AuthCodeURL(state), http.StatusTemporaryRedirect)
-}
-
-// --------------------------------
-
-type LogoutHandler struct {
-	state *SimpleWebApp
-}
-
-func (h *LogoutHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !h.state.ensureSessions(w) {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	ctx, span := trace.StartSpan(ctx, r.URL.Path)
-	defer span.End()
-
-	logoutUrl, err := url.Parse(h.state.config.auth0Domain)
-	if h.state.HandleError(w, err, "internal config error parsing domain") {
-		return
-	}
-
-	logoutUrl.Path = "/v2/logout"
-	parameters := url.Values{}
-
-	parameters.Add("returnTo", h.state.config.webRoot)
-	parameters.Add("client_id", h.state.config.auth0ClientId)
-	logoutUrl.RawQuery = parameters.Encode()
-
-	h.state.sessions.DeleteSession(ctx, r, w)
-	http.Redirect(w, r, logoutUrl.String(), http.StatusTemporaryRedirect)
-}
-
 // -------------------------
 
 type TemplateHandler interface {
@@ -625,7 +429,7 @@ func (tm *TemplateMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	r = r.WithContext(ctx)
 
 	user, err := tm.App.GetLoggedInUserInfo(r)
-	if tm.App.HandleError(w, err) {
+	if HandleError(w, err) {
 		return
 	}
 
@@ -639,19 +443,19 @@ func (tm *TemplateMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 
 	t, data, err := tm.Handler.Serve(r, user)
-	if tm.App.HandleError(w, err) {
+	if HandleError(w, err) {
 		return
 	}
 
 	gt := t.direct
 	if gt == nil {
 		gt, err = tm.App.LookupTemplate(t.named)
-		if tm.App.HandleError(w, err) {
+		if HandleError(w, err) {
 			return
 		}
 	}
 
-	tm.App.HandleError(w, gt.Execute(w, data))
+	HandleError(w, gt.Execute(w, data))
 }
 
 // -------------------------
