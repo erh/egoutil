@@ -3,7 +3,6 @@ package egoutil
 import (
 	"context"
 	"embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -355,33 +354,6 @@ func HandleError(w http.ResponseWriter, err error, context ...string) bool {
 	return true
 }
 
-func (app *SimpleWebApp) HandleAPIError(w http.ResponseWriter, err error, extra interface{}) bool {
-	if err == nil {
-		return false
-	}
-
-	log.Printf("api error: %s %s\n", err, extra)
-
-	data := map[string]interface{}{"err": err.Error()}
-	if extra != nil {
-		data["extra"] = extra
-	}
-
-	js, err := json.Marshal(data)
-	if err != nil {
-		temp := fmt.Sprintf("err not able to be converted to json (%s) (%s)", data, err)
-		w.WriteHeader(500)
-		w.Write([]byte(temp))
-
-	} else {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(js)
-	}
-
-	return true
-}
-
 // -------------------------
 
 type TemplateHandler interface {
@@ -438,10 +410,6 @@ func (tm *TemplateMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if user.LoggedIn {
-		span.Annotatef(nil, "logged in user: %s", user.GetEmail())
-	}
-
 	t, data, err := tm.Handler.Serve(r, user)
 	if HandleError(w, err) {
 		return
@@ -456,50 +424,4 @@ func (tm *TemplateMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 
 	HandleError(w, gt.Execute(w, data))
-}
-
-// -------------------------
-
-// TODO(erd): find a way to merge or reduce code with TemplateHandler
-type APIHandler interface {
-	// return (result, error)
-	ServeAPI(r *http.Request, user UserInfo) (interface{}, error)
-}
-
-// TODO(erd): find a way to merge or reduce code with TemplateMiddleware
-type APIMiddleware struct {
-	App     *SimpleWebApp
-	Handler APIHandler
-}
-
-func (am *APIMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	ctx, span := trace.StartSpan(ctx, r.URL.Path)
-	defer span.End()
-
-	r = r.WithContext(ctx)
-
-	user, err := am.App.GetLoggedInUserInfo(r)
-	if am.App.HandleAPIError(w, err, nil) {
-		return
-	}
-
-	if user.LoggedIn {
-		span.Annotatef(nil, "logged in user: %s", user.GetEmail())
-	}
-
-	data, err := am.Handler.ServeAPI(r, user)
-	if am.App.HandleAPIError(w, err, data) {
-		return
-	}
-
-	js, err := json.Marshal(data)
-	if am.App.HandleAPIError(w, err, nil) {
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(js)
 }
